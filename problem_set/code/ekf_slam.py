@@ -86,6 +86,8 @@ def warp2pi(angle_rad):
     \param angle_rad Input angle in radius
     \return angle_rad_warped Warped angle to [-\pi, \pi].
     """
+    angle_rad =  angle_rad - 2*np.pi*np.floor((angle_rad + np.pi)/(2*np.pi)) 
+
     return angle_rad
 
 
@@ -101,11 +103,36 @@ def init_landmarks(init_measure, init_measure_cov, init_pose, init_pose_cov):
     \return landmarks Numpy array of shape (2k, 1) for the state.
     \return landmarks_cov Numpy array of shape (2k, 2k) for the uncertainty.
     '''
-
+    x, y, theta = init_pose
     k = init_measure.shape[0] // 2
+    b = init_measure[0::2]
+    r = init_measure[1::2]
+
 
     landmark = np.zeros((2 * k, 1))
+    landmark[0::2] = x + r*np.cos(warp2pi(theta + b))
+    landmark[1::2] = y + r*np.sin(warp2pi(theta + b))
+
     landmark_cov = np.zeros((2 * k, 2 * k))
+
+    for i in range(k):
+        # Jacobian of the landmark position w.r.t the measurement (beta, range)
+        del_cos = np.cos(warp2pi(theta + b[i])).item() 
+        del_sin = np.sin(warp2pi(theta + b[i])).item()
+        r_i = r[i].item()
+        
+        # Jacobian of landmark wrt measurement (beta, range)
+        J_m = np.array(([-r_i*del_sin, del_cos], 
+                        [ r_i*del_cos, del_sin]))
+
+        # Jacobian of the landmark position w.r.t  pose (x, y, theta)
+        J_p = np.array([[1, 0, -r_i*del_sin], 
+                        [0, 1,  r_i*del_cos]])
+        
+        # Landmark covariance
+        landmark_cov[2*i:2*i+2, 2*i:2*i+2] = J_m @ init_measure_cov @ J_m.T + J_p @ init_pose_cov @ J_p.T
+
+
 
     return k, landmark, landmark_cov
 
@@ -122,6 +149,27 @@ def predict(X, P, control, control_cov, k):
     \return X_pre Predicted X state of shape (3 + 2k, 1).
     \return P_pre Predicted P covariance of shape (3 + 2k, 3 + 2k).
     '''
+    theta = X[2, 0]
+    d, alpha = control[0,0], control[1, 0]
+
+    # Predicted Pose
+    X[0, 0] += d*np.cos(theta)
+    X[1, 0] += d*np.sin(theta)
+    X[2, 0]  = warp2pi(theta + alpha)
+
+    G = np.array([[1, 0, -d*np.sin(theta)], 
+                  [0, 1,  d*np.cos(theta)], 
+                  [0, 0,        1        ]])
+    
+    # According to the book its Identity
+    F = np.eye(3)
+    # According to the local frame of error
+    F = np.array([[np.cos(theta), -np.sin(theta), 0], 
+                  [np.sin(theta),  np.cos(theta), 0], 
+                  [     0       ,       0       , 1]])
+
+    # Predicted Covariance
+    P[0:3, 0:3] = G @ P[0:3, 0:3] @ G.T + F @ control_cov @ F.T
 
     return X, P
 
@@ -139,6 +187,52 @@ def update(X_pre, P_pre, measure, measure_cov, k):
     \return P Updated P covariance of shape (3 + 2k, 3 + 2k).
     '''
 
+    x, y, theta = X_pre[0,0], X_pre[1,0], X_pre[2, 0]
+    landmarks = X_pre[3:]
+    # beta, range
+    b = measure[0::2]
+    r = measure[1::2]
+
+    # expected beta, range
+    measure_expected = np.zeros((2*k, 1))
+    lx, ly = landmarks[0::2], landmarks[1::2]
+    measure_expected[0::2] = warp2pi(np.arctan2((ly - y), (lx - x)) - theta) 
+    measure_expected[1::2] = np.sqrt((lx-x)**2 + (ly - y)**2)
+
+
+    # Landmarks in global frame
+    global_landmarks = np.zeros((2*k, 1))
+    global_landmarks[0::2] = x + r*np.cos(warp2pi(theta + b))
+    global_landmarks[1::2] = y + r*np.sin(warp2pi(theta + b))
+
+    # Measurement Covariance Q
+    Q = np.zeros((2*k, 2*k))
+    # Jacobian H
+    H = np.zeros((2*k, 2*k + 3))
+
+    for i in range(k):
+        lx, ly = global_landmarks[2*i].item() , global_landmarks[2*i + 1].item()
+        qt = (lx -x)**2 + (ly - y)**2
+        
+        
+        H_P = np.array([[(ly -  y)/qt         , (lx - x )/qt         , -1],
+                        [(x  - lx)/np.sqrt(qt), (y  - ly)/np.sqrt(qt),  0]])
+
+        H_L = np.array([[(y  - ly)/qt         , (x - lx)/qt         ],
+                        [(lx - x )/np.sqrt(qt), (ly - y)/np.sqrt(qt)]])
+
+        H[2*i:2*i + 2, 0:3] = H_P
+        H[2*i:2*i + 2, 3 + 2*i: 3 + 2*i + 2] = H_L
+
+        Q[2*i:2*i + 2, 2*i:2*i + 2] = measure_cov
+
+    # Kalman Gain
+    K = P_pre @ H.T @ np.linalg.inv(H @ P_pre @ H.T + Q)
+
+    # Updated Mean & Covariance
+    X_pre += K @ (measure - measure_expected)
+    P_pre  = (np.eye(3 + 2*k) - K @ H) @ P_pre
+    
     return X_pre, P_pre
 
 
