@@ -133,7 +133,8 @@ def init_landmarks(init_measure, init_measure_cov, init_pose, init_pose_cov):
         landmark_cov[2*i:2*i+2, 2*i:2*i+2] = J_m @ init_measure_cov @ J_m.T + J_p @ init_pose_cov @ J_p.T
 
 
-
+    print("Initial Landmark Covariance ")
+    print(landmark_cov)
     return k, landmark, landmark_cov
 
 
@@ -157,19 +158,22 @@ def predict(X, P, control, control_cov, k):
     X[1, 0] += d*np.sin(theta)
     X[2, 0]  = warp2pi(theta + alpha)
 
-    G = np.array([[1, 0, -d*np.sin(theta)], 
-                  [0, 1,  d*np.cos(theta)], 
-                  [0, 0,        1        ]])
+    G = np.eye(3 + 2*k)
+    G[0, 2] = -d*np.sin(theta)
+    G[1, 2] =  d*np.cos(theta)
+
+
+    # According to the book it can Identity
     
-    # According to the book its Identity
-    F = np.eye(3)
+    # F = np.eye(3)
     # According to the local frame of error
     F = np.array([[np.cos(theta), -np.sin(theta), 0], 
                   [np.sin(theta),  np.cos(theta), 0], 
                   [     0       ,       0       , 1]])
 
     # Predicted Covariance
-    P[0:3, 0:3] = G @ P[0:3, 0:3] @ G.T + F @ control_cov @ F.T
+    P = G @ P @ G.T 
+    P[0:3, 0:3] += F @ control_cov @ F.T
 
     return X, P
 
@@ -215,11 +219,14 @@ def update(X_pre, P_pre, measure, measure_cov, k):
         qt = (lx -x)**2 + (ly - y)**2
         
         
-        H_P = np.array([[(ly -  y)/qt         , (lx - x )/qt         , -1],
+
+        H_P = np.array([[(ly -  y)/qt         , (x - lx )/qt         , -1],
                         [(x  - lx)/np.sqrt(qt), (y  - ly)/np.sqrt(qt),  0]])
 
-        H_L = np.array([[(y  - ly)/qt         , (x - lx)/qt         ],
+
+        H_L = np.array([[(y  - ly)/qt         , (lx - x)/qt         ],
                         [(lx - x )/np.sqrt(qt), (ly - y)/np.sqrt(qt)]])
+
 
         H[2*i:2*i + 2, 0:3] = H_P
         H[2*i:2*i + 2, 3 + 2*i: 3 + 2*i + 2] = H_L
@@ -246,10 +253,46 @@ def evaluate(X, P, k):
 
     \return None
     '''
+    plt.title('EKF SLAM: Ground Truth vs Estimated Landmarks')
+    plt.xlabel('X')
+    plt.ylabel('Y')
+    plt.grid(True)
+    
+    # True Measurement
     l_true = np.array([3, 6, 3, 12, 7, 8, 7, 14, 11, 6, 11, 12], dtype=float)
-    plt.scatter(l_true[0::2], l_true[1::2])
-    plt.draw()
-    plt.waitforbuttonpress(0)
+    plt.scatter(l_true[0::2], l_true[1::2], c='r', label='Ground Truth')
+    
+    # Estimated Measurement
+    l_estimated = X[3:]
+    plt.scatter(l_estimated[0::2], l_estimated[1::2], c='b', label='Estimated')
+
+    
+    # Exit to get the distances
+    plt.axis('equal')
+    plt.legend()
+    plt.pause(0)
+    
+    
+    l_true = l_true.reshape(-1, 2)
+    l_estimated = l_estimated.reshape(-1, 2)
+    
+    for i in range(k):
+        l_cov = P[3 + 2*i:3 + 2*i+ 2, 3 + 2*i:3 + 2*i + 2]
+        error = (l_true[i] - l_estimated[i])
+
+        # Euclidean Distance
+        euclidean_distance = np.linalg.norm(l_true[i] - l_estimated[i])
+        error = error.flatten()
+
+        # Mahalanobis Distance
+        mahalanobis_distance = np.sqrt(error.T @ np.linalg.inv(l_cov) @ error)
+        
+        print(f"Landmark :{i+1}")
+        print(f"Euclidean distance: {euclidean_distance}")
+        print(f"Mahalanobis distance: {mahalanobis_distance}")
+
+    print("Final Pose and Landmark Covariances")
+    print(P)
 
 
 def main():
